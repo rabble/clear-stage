@@ -36,9 +36,10 @@ def detect_people(
     Coordinates are in pixel space of the original frame.
     """
     import groundingdino
-    from groundingdino.util.inference import load_model, predict
+    from groundingdino.util.inference import load_model, load_image, predict
     from PIL import Image
     import os
+    import tempfile
 
     frame_bgr = extract_frame(video_path, frame_idx)
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -50,10 +51,18 @@ def detect_people(
 
     model = load_model(config_path, "groundingdino_swint_ogc.pth")
 
-    image_pil = Image.fromarray(frame_rgb)
+    # GroundingDINO predict() expects a transformed tensor from load_image(),
+    # not a raw PIL Image. Save frame to temp file and use load_image().
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp_path = tmp.name
+        Image.fromarray(frame_rgb).save(tmp_path)
+
+    image_source, image_transformed = load_image(tmp_path)
+    os.unlink(tmp_path)
+
     boxes, logits, phrases = predict(
         model=model,
-        image=image_pil,
+        image=image_transformed,
         caption=text_prompt,
         box_threshold=confidence_threshold,
         text_threshold=confidence_threshold,
