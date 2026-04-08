@@ -34,14 +34,38 @@ def run_mask_generation(config_path: str, device: str = "cuda") -> None:
     )
 
 
+def compute_void_sample_size(width: int, height: int) -> str:
+    """Compute the VOID sample_size string (HxW) preserving aspect ratio.
+
+    VOID's default is 384x672 (landscape). Dimensions must be divisible by 16
+    for the VAE. We pick the closest fit within the ~250k pixel budget
+    (384*672 = 258048) that preserves the input aspect ratio.
+    """
+    target_pixels = 384 * 672  # ~258k pixels, VOID's default budget
+    aspect = width / height
+
+    # Solve: h * w = target_pixels, w/h = aspect
+    # h = sqrt(target_pixels / aspect), w = h * aspect
+    h = int((target_pixels / aspect) ** 0.5)
+    w = int(h * aspect)
+
+    # Round to nearest multiple of 16 (VAE requirement)
+    h = max(16, (h // 16) * 16)
+    w = max(16, (w // 16) * 16)
+
+    return f"{h}x{w}"
+
+
 def run_void_inference(
     data_rootdir: str, seq_names: list[str],
+    sample_size: str = "384x672",
     transformer_path: str = "void-model/void_pass1.safetensors",
     save_path: str | None = None,
 ) -> None:
     """Run VOID Pass 1 inference.
 
     predict_v2v.py uses ml_collections config flags (Python .py files).
+    sample_size: 'HxW' string matching the input video aspect ratio.
     """
     repo_root = Path(__file__).parent.parent
     script = repo_root / "void-model" / "inference" / "cogvideox_fun" / "predict_v2v.py"
@@ -54,6 +78,7 @@ def run_void_inference(
         "python", str(script),
         f"--config={py_config}",
         f"--config.data.data_rootdir={data_rootdir}",
+        f"--config.data.sample_size={sample_size}",
         f"--config.experiment.run_seqs={','.join(seq_names)}",
         f"--config.video_model.transformer_path={str(repo_root / transformer_path)}",
         f"--config.experiment.save_path={save_path}",
@@ -134,9 +159,15 @@ def main():
 
     # Step 5: VOID inference (serial — parallelize on RunPod later)
     print("\n=== Step 5: VOID inference ===")
+    # Detect video dimensions and compute aspect-ratio-preserving sample size
+    from clear_stage.chunk_video import get_video_info
+    video_info = get_video_info(args.video)
+    sample_size = compute_void_sample_size(video_info["width"], video_info["height"])
+    print(f"Input: {video_info['width']}x{video_info['height']} -> VOID sample_size: {sample_size}")
     run_void_inference(
         chunks_dir, [c["chunk_name"] for c in chunk_infos],
-        args.transformer_path,
+        sample_size=sample_size,
+        transformer_path=args.transformer_path,
     )
 
     # Step 6: Stitch
