@@ -1,9 +1,25 @@
 #!/bin/bash
 # Setup script for RunPod A100 instance
-# Run this once after cloning the repo on a GPU machine
+#
+# Model weights are stored on a RunPod Network Volume so they persist
+# across sessions. First run downloads ~20GB; subsequent runs skip.
+#
+# Usage:
+#   1. Create a RunPod Network Volume (30GB)
+#   2. Launch a pod with the volume mounted at /workspace
+#   3. git clone --recursive https://github.com/rabble/clear-stage.git /workspace/clear-stage
+#   4. cd /workspace/clear-stage && bash setup.sh
+#
+# On subsequent runs, just: cd /workspace/clear-stage && bash setup.sh
+# (skips downloads, only installs pip deps if needed)
+
 set -e
 
 echo "=== Clear Stage Setup ==="
+
+# Where to store large model weights (persists on Network Volume)
+WEIGHTS_DIR="${WEIGHTS_DIR:-/workspace/models}"
+mkdir -p "$WEIGHTS_DIR"
 
 # Install system deps
 apt-get update && apt-get install -y ffmpeg git-lfs 2>/dev/null || true
@@ -13,61 +29,66 @@ if [ ! -d "void-model/videox_fun" ]; then
     git submodule update --init --recursive
 fi
 
-# Create venv
-python3 -m venv .venv
+# Create venv (on the persistent volume so pip installs survive too)
+if [ ! -d ".venv" ]; then
+    python3 -m venv .venv
+fi
 source .venv/bin/activate
 
-# Install VOID dependencies
-pip install -r void-model/requirements.txt
+# Install deps (skip if already done)
+if ! python -c "import videox_fun" 2>/dev/null; then
+    pip install -r void-model/requirements.txt
+    pip install git+https://github.com/facebookresearch/segment-anything-2.git
+    pip install groundingdino-py || pip install git+https://github.com/IDEA-Research/GroundingDINO.git
+    pip install -r requirements.txt
+fi
 
-# Install SAM2
-pip install git+https://github.com/facebookresearch/segment-anything-2.git
+# Download model checkpoints to persistent volume
+echo "=== Checking model checkpoints in $WEIGHTS_DIR ==="
 
-# Install GroundingDINO
-pip install groundingdino-py || pip install git+https://github.com/IDEA-Research/GroundingDINO.git
-
-# Install our deps
-pip install -r requirements.txt
-
-# Download model checkpoints
-echo "=== Downloading model checkpoints (~20GB) ==="
-
-cd void-model
-
-# VOID Pass 1 checkpoint
-if [ ! -f "void_pass1.safetensors" ]; then
+# VOID Pass 1
+if [ ! -f "$WEIGHTS_DIR/void_pass1.safetensors" ]; then
     echo "Downloading VOID Pass 1..."
-    huggingface-cli download netflix/void-model void_pass1.safetensors --local-dir .
+    huggingface-cli download netflix/void-model void_pass1.safetensors --local-dir "$WEIGHTS_DIR"
 fi
 
 # Base CogVideoX model
-if [ ! -d "CogVideoX-Fun-V1.5-5b-InP" ]; then
+if [ ! -d "$WEIGHTS_DIR/CogVideoX-Fun-V1.5-5b-InP" ]; then
     echo "Downloading CogVideoX base model..."
-    huggingface-cli download alibaba-pai/CogVideoX-Fun-V1.5-5b-InP --local-dir ./CogVideoX-Fun-V1.5-5b-InP
+    huggingface-cli download alibaba-pai/CogVideoX-Fun-V1.5-5b-InP \
+        --local-dir "$WEIGHTS_DIR/CogVideoX-Fun-V1.5-5b-InP"
 fi
 
 # SAM2 checkpoint
-if [ ! -f "sam2_hiera_large.pt" ]; then
+if [ ! -f "$WEIGHTS_DIR/sam2_hiera_large.pt" ]; then
     echo "Downloading SAM2 checkpoint..."
-    wget -q https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt
+    wget -q -O "$WEIGHTS_DIR/sam2_hiera_large.pt" \
+        https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt
 fi
-
-cd ..
 
 # GroundingDINO weights
-if [ ! -f "groundingdino_swint_ogc.pth" ]; then
+if [ ! -f "$WEIGHTS_DIR/groundingdino_swint_ogc.pth" ]; then
     echo "Downloading GroundingDINO weights..."
-    wget -q https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
+    wget -q -O "$WEIGHTS_DIR/groundingdino_swint_ogc.pth" \
+        https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
 fi
 
-# Set up ffmpeg symlink if needed
+# Symlink weights into expected locations
+ln -sf "$WEIGHTS_DIR/void_pass1.safetensors" void-model/void_pass1.safetensors
+ln -sf "$WEIGHTS_DIR/sam2_hiera_large.pt" void-model/sam2_hiera_large.pt
+ln -sf "$WEIGHTS_DIR/groundingdino_swint_ogc.pth" groundingdino_swint_ogc.pth
+if [ -d "$WEIGHTS_DIR/CogVideoX-Fun-V1.5-5b-InP" ]; then
+    ln -sfn "$WEIGHTS_DIR/CogVideoX-Fun-V1.5-5b-InP" void-model/CogVideoX-Fun-V1.5-5b-InP
+fi
+
+# Set up ffmpeg if needed
 if ! command -v ffmpeg &> /dev/null; then
-    echo "Setting up ffmpeg from imageio..."
     ln -sf $(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())") ~/.local/bin/ffmpeg
 fi
 
 echo ""
 echo "=== Setup complete! ==="
+echo "Weights stored in: $WEIGHTS_DIR (persistent across sessions)"
 echo ""
 echo "To run:"
 echo "  source .venv/bin/activate"
