@@ -1,0 +1,13 @@
+# Person detection
+groundingdino-py
+
+# Video processing
+opencv-python>=4.8
+
+# VLM (for mask pipeline stage 2)
+google-generativeai
+
+# Core
+numpy
+torch
+Pillow

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.env
+*.safetensors
+*.pt
+*.pth
+/work/
+/output/
+*_frame0.jpg
