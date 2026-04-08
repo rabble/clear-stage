@@ -35,17 +35,20 @@ def detect_people(
         [{"bbox": [x1, y1, x2, y2], "score": float}, ...]
     Coordinates are in pixel space of the original frame.
     """
+    import groundingdino
     from groundingdino.util.inference import load_model, predict
     from PIL import Image
+    import os
 
     frame_bgr = extract_frame(video_path, frame_idx)
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     h, w = frame_rgb.shape[:2]
 
-    model = load_model(
-        "groundingdino/config/GroundingDINO_SwinT_OGC.py",
-        "groundingdino_swint_ogc.pth",
-    )
+    # Find config relative to installed package
+    pkg_dir = os.path.dirname(groundingdino.__file__)
+    config_path = os.path.join(pkg_dir, "config", "GroundingDINO_SwinT_OGC.py")
+
+    model = load_model(config_path, "groundingdino_swint_ogc.pth")
 
     image_pil = Image.fromarray(frame_rgb)
     boxes, logits, phrases = predict(
