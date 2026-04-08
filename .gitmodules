@@ -1,0 +1,3 @@
+[submodule "void-model"]
+	path = void-model
+	url = https://github.com/Netflix/void-model.git
