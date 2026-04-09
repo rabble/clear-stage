@@ -1,43 +1,26 @@
 """
-End-to-end pipeline: detect → select → mask → chunk → VOID → stitch.
+End-to-end pipeline: detect → segment → VOID inpaint → output.
 
 Usage:
     python -m clear_stage.run_pipeline \
         --video sample_videos/IMG_2745.mov \
         --output output/result.mp4 \
         --prompt "A pole dance studio with mirrors and wooden floor" \
-        --work-dir /tmp/clear_stage_work
+        --principal 1
 """
 import argparse
+import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
 from clear_stage.detect_people import detect_people, find_good_detection_frame
 from clear_stage.select_principal import select_principal_cli, save_detection_preview
-from clear_stage.generate_points_config import generate_config, save_config
-from clear_stage.chunk_video import prepare_chunks
-from clear_stage.stitch_chunks import stitch_chunks, remux_audio
-
-
-def run_mask_generation(config_path: str, device: str = "cuda") -> None:
-    """Run VLM-MASK-REASONER stages 1-4."""
-    repo_root = Path(__file__).parent.parent
-    void_root = repo_root / "void-model"
-    script = void_root / "VLM-MASK-REASONER" / "run_pipeline.sh"
-    sam2_ckpt = void_root / "sam2_hiera_large.pt"
-    subprocess.run(
-        ["bash", str(script), config_path,
-         "--sam2-checkpoint", str(sam2_ckpt),
-         "--device", device],
-        cwd=str(void_root),
-        check=True,
-    )
-
-
-def compute_void_sample_size(width: int, height: int) -> str:
-    """Deprecated: use resolution.get_sample_size instead."""
-    from clear_stage.resolution import get_sample_size
-    return get_sample_size(width, height, quality="standard")
+from clear_stage.segment_people import segment_background_people, save_mask_video, save_mask_overlay
+from clear_stage.chunk_video import get_video_info, extract_audio
+from clear_stage.stitch_chunks import remux_audio
+from clear_stage.resolution import get_sample_size
 
 
 def run_void_inference(
@@ -46,11 +29,7 @@ def run_void_inference(
     transformer_path: str = "void-model/void_pass1.safetensors",
     save_path: str | None = None,
 ) -> None:
-    """Run VOID Pass 1 inference.
-
-    predict_v2v.py uses ml_collections config flags (Python .py files).
-    sample_size: 'HxW' string matching the input video aspect ratio.
-    """
+    """Run VOID Pass 1 inference."""
     repo_root = Path(__file__).parent.parent
     script = repo_root / "void-model" / "inference" / "cogvideox_fun" / "predict_v2v.py"
     py_config = str(repo_root / "void-model" / "config" / "quadmask_cogvideox.py")
@@ -70,17 +49,133 @@ def run_void_inference(
     subprocess.run(cmd, cwd=str(repo_root / "void-model"), check=True)
 
 
+def run_pipeline(
+    video: str,
+    output: str,
+    prompt: str = "A pole dance studio with mirrors and wooden floor",
+    quality: str = "standard",
+    principal: int | None = None,
+    frame: int | None = None,
+    work_dir: str = "/tmp/clear_stage_work",
+    device: str = "cuda",
+    transformer_path: str = "void-model/void_pass1.safetensors",
+    sam2_checkpoint: str | None = None,
+) -> str:
+    """Run the full clear-stage pipeline.
+
+    Returns path to the output video.
+    """
+    repo_root = Path(__file__).parent.parent
+    work = Path(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+
+    if sam2_checkpoint is None:
+        sam2_checkpoint = str(repo_root / "void-model" / "sam2_hiera_large.pt")
+
+    # Step 1: Detect people
+    print("\n=== Step 1: Detecting people ===")
+    if frame is not None:
+        frame_idx = frame
+        detections = detect_people(video, frame_idx)
+    else:
+        print("Auto-finding best frame for detection...")
+        frame_idx, detections = find_good_detection_frame(video)
+        print(f"Using frame {frame_idx}")
+
+    if not detections:
+        print("No people detected. Nothing to remove.")
+        shutil.copy(video, output)
+        return output
+    print(f"Found {len(detections)} people")
+
+    # Step 2: Select principal dancer
+    preview = str(work / "detection_preview.jpg")
+    save_detection_preview(video, detections, preview, frame_idx)
+    print(f"Preview saved: {preview}")
+
+    if principal is not None:
+        principal_idx = principal
+    else:
+        principal_idx = select_principal_cli(detections)
+
+    if len(detections) == 1:
+        print("Only one person detected (the principal). Nothing to remove.")
+        shutil.copy(video, output)
+        return output
+
+    # Step 3: Segment background people with SAM2
+    print("\n=== Step 3: Segmenting background people ===")
+    mask_video = segment_background_people(
+        video, detections, principal_idx,
+        sam2_checkpoint=sam2_checkpoint,
+        frame_idx=frame_idx, device=device,
+    )
+
+    # Save mask overlay for debugging
+    save_mask_overlay(video, mask_video, str(work / "mask_overlay.jpg"), frame_idx)
+    print(f"Mask overlay saved: {work / 'mask_overlay.jpg'}")
+
+    # Step 4: Set up VOID input structure
+    print("\n=== Step 4: Preparing VOID input ===")
+    video_info = get_video_info(video)
+    sample_size = get_sample_size(video_info["width"], video_info["height"], quality)
+    print(f"Input: {video_info['width']}x{video_info['height']} "
+          f"-> VOID sample_size: {sample_size} (quality={quality})")
+
+    void_dir = str(work / "void_input")
+    seq_dir = os.path.join(void_dir, "seq")
+    os.makedirs(seq_dir, exist_ok=True)
+
+    shutil.copy(video, os.path.join(seq_dir, "input_video.mp4"))
+    save_mask_video(mask_video, os.path.join(seq_dir, "quadmask_0.mp4"),
+                    fps=video_info["fps"])
+    with open(os.path.join(seq_dir, "prompt.json"), "w") as f:
+        json.dump({"bg": prompt}, f)
+
+    # Step 5: Run VOID inference
+    print("\n=== Step 5: VOID inference ===")
+    void_output_dir = str(work / "void_output")
+    run_void_inference(
+        void_dir, ["seq"],
+        sample_size=sample_size,
+        transformer_path=transformer_path,
+        save_path=void_output_dir,
+    )
+
+    # Step 6: Find output and remux audio
+    print("\n=== Step 6: Finalizing output ===")
+    import glob
+    void_outputs = glob.glob(f"{void_output_dir}/**/*.mp4", recursive=True)
+    # Filter out _tuple files
+    void_outputs = [f for f in void_outputs if "_tuple" not in f]
+    if not void_outputs:
+        raise FileNotFoundError(f"No VOID output found in {void_output_dir}")
+
+    void_result = void_outputs[0]
+    print(f"VOID output: {void_result}")
+
+    # Extract and remux audio from original
+    audio_path = str(work / "audio.aac")
+    has_audio = extract_audio(video, audio_path)
+    if has_audio:
+        remux_audio(void_result, audio_path, output)
+        print(f"Audio remuxed into output")
+    else:
+        shutil.copy(void_result, output)
+
+    print(f"\nDone! Output: {output}")
+    return output
+
+
 def main():
     parser = argparse.ArgumentParser(description="Remove background dancers from pole dance video")
     parser.add_argument("--video", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--prompt", required=True, help="Background description after removal")
+    parser.add_argument("--prompt", default="A pole dance studio with mirrors and wooden floor",
+                        help="Background description after removal")
     parser.add_argument("--work-dir", default="/tmp/clear_stage_work")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--transformer-path", default="void-model/void_pass1.safetensors")
-    parser.add_argument("--target-fps", type=float, default=12.0)
-    parser.add_argument("--max-frames", type=int, default=197)
-    parser.add_argument("--overlap", type=int, default=20)
     parser.add_argument("--principal", type=int, default=None,
                         help="Skip interactive selection, use this index")
     parser.add_argument("--frame", type=int, default=None,
@@ -90,84 +185,17 @@ def main():
                         help="Output resolution quality")
     args = parser.parse_args()
 
-    work = Path(args.work_dir)
-    work.mkdir(parents=True, exist_ok=True)
-
-    # Step 1: Detect people
-    print("\n=== Step 1: Detecting people ===")
-    if args.frame is not None:
-        frame_idx = args.frame
-        detections = detect_people(args.video, frame_idx)
-    else:
-        print("Auto-finding best frame for detection...")
-        frame_idx, detections = find_good_detection_frame(args.video)
-        print(f"Using frame {frame_idx}")
-
-    if not detections:
-        print("No people detected. Nothing to remove.")
-        subprocess.run(["cp", args.video, args.output], check=True)
-        return
-    print(f"Found {len(detections)} people")
-
-    # Step 2: Select principal
-    preview = str(work / "detection_preview.jpg")
-    save_detection_preview(args.video, detections, preview, frame_idx)
-    print(f"Preview saved: {preview}")
-
-    if args.principal is not None:
-        principal_idx = args.principal
-    else:
-        principal_idx = select_principal_cli(detections)
-
-    if len(detections) == 1:
-        print("Only one person detected (the principal). Nothing to remove.")
-        subprocess.run(["cp", args.video, args.output], check=True)
-        return
-
-    # Step 3: Generate masks
-    print("\n=== Step 3: Generating masks ===")
-    mask_dir = str(work / "masks")
-    config = generate_config(
-        args.video, mask_dir, detections, principal_idx, frame_idx,
-    )
-    config_path = str(work / "config_points.json")
-    save_config(config, config_path)
-    run_mask_generation(config_path, args.device)
-
-    # Step 4: Chunk
-    print("\n=== Step 4: Chunking ===")
-    quadmask = str(Path(mask_dir) / "quadmask_0.mp4")
-    chunks_dir = str(work / "chunks")
-    chunk_infos = prepare_chunks(
-        args.video, quadmask, args.prompt, chunks_dir,
-        args.target_fps, args.max_frames, args.overlap,
-    )
-    print(f"Split into {len(chunk_infos)} chunks")
-
-    # Step 5: VOID inference (serial — parallelize on RunPod later)
-    print("\n=== Step 5: VOID inference ===")
-    # Detect video dimensions and compute aspect-ratio-preserving sample size
-    from clear_stage.chunk_video import get_video_info
-    from clear_stage.resolution import get_sample_size
-    video_info = get_video_info(args.video)
-    sample_size = get_sample_size(video_info["width"], video_info["height"], args.quality)
-    print(f"Input: {video_info['width']}x{video_info['height']} -> VOID sample_size: {sample_size}")
-    run_void_inference(
-        chunks_dir, [c["chunk_name"] for c in chunk_infos],
-        sample_size=sample_size,
+    run_pipeline(
+        video=args.video,
+        output=args.output,
+        prompt=args.prompt,
+        quality=args.quality,
+        principal=args.principal,
+        frame=args.frame,
+        work_dir=args.work_dir,
+        device=args.device,
         transformer_path=args.transformer_path,
     )
-
-    # Step 6: Stitch
-    print("\n=== Step 6: Stitching ===")
-    stitched = str(work / "stitched.mp4")
-    stitch_chunks(chunk_infos, chunks_dir, stitched, args.overlap, args.target_fps)
-
-    # Step 7: Audio
-    print("\n=== Step 7: Re-attaching audio ===")
-    audio = str(Path(chunks_dir) / "audio.aac")
-    remux_audio(stitched, audio, args.output)
-    print(f"\nDone! Output: {args.output}")
 
 
 if __name__ == "__main__":
