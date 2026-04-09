@@ -72,31 +72,31 @@ def run_pipeline(
     if sam2_checkpoint is None:
         sam2_checkpoint = str(repo_root / "void-model" / "sam2_hiera_large.pt")
 
-    # Step 1: Detect people
+    # Step 1: Detect people and select principal
     print("\n=== Step 1: Detecting people ===")
-    if frame is not None:
-        frame_idx = frame
-        detections = detect_people(video, frame_idx)
+    if principal is not None:
+        # User specified principal — just detect on one frame
+        if frame is not None:
+            frame_idx = frame
+            detections = detect_people(video, frame_idx)
+        else:
+            frame_idx, detections = find_good_detection_frame(video)
+        principal_idx = principal
     else:
-        print("Auto-finding best frame for detection...")
-        frame_idx, detections = find_good_detection_frame(video)
-        print(f"Using frame {frame_idx}")
+        # Auto-detect principal using multi-frame motion/centrality analysis
+        from clear_stage.auto_select import auto_select_principal
+        principal_idx, detections, frame_idx = auto_select_principal(video)
 
     if not detections:
         print("No people detected. Nothing to remove.")
         shutil.copy(video, output)
         return output
-    print(f"Found {len(detections)} people")
+    print(f"Found {len(detections)} people, principal=#{principal_idx}")
 
-    # Step 2: Select principal dancer
+    # Save detection preview
     preview = str(work / "detection_preview.jpg")
     save_detection_preview(video, detections, preview, frame_idx)
     print(f"Preview saved: {preview}")
-
-    if principal is not None:
-        principal_idx = principal
-    else:
-        principal_idx = select_principal_cli(detections)
 
     if len(detections) == 1:
         print("Only one person detected (the principal). Nothing to remove.")
