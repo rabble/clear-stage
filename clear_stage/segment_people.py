@@ -12,6 +12,7 @@ def segment_background_people(
     sam2_checkpoint: str,
     frame_idx: int = 0,
     device: str = "cuda",
+    erode_iterations: int = 2,
 ) -> np.ndarray:
     """
     Segment all background people (everyone except the principal) using SAM2.
@@ -90,6 +91,13 @@ def segment_background_people(
     predictor.reset_state(state)
     import shutil
     shutil.rmtree(frames_dir, ignore_errors=True)
+
+    # Dilate keep regions (255) to shrink removal regions (0),
+    # preventing the mask from eating into the principal dancer
+    if erode_iterations > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        for i in range(mask_video.shape[0]):
+            mask_video[i] = cv2.dilate(mask_video[i], kernel, iterations=erode_iterations)
 
     print(f"Mask video: {mask_video.shape}, "
           f"removal coverage frame 0: {np.sum(mask_video[0] == 0) / mask_video[0].size * 100:.1f}%")
