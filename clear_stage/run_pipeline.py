@@ -115,44 +115,48 @@ def run_pipeline(
     save_mask_overlay(video, mask_video, str(work / "mask_overlay.jpg"), frame_idx)
     print(f"Mask overlay saved: {work / 'mask_overlay.jpg'}")
 
-    # Step 4: Set up VOID input structure
-    print("\n=== Step 4: Preparing VOID input ===")
+    # Step 4: Save full mask video and prepare chunks
+    print("\n=== Step 4: Preparing chunks ===")
     video_info = get_video_info(video)
     sample_size = get_sample_size(video_info["width"], video_info["height"], quality)
     print(f"Input: {video_info['width']}x{video_info['height']} "
           f"-> VOID sample_size: {sample_size} (quality={quality})")
 
-    void_dir = str(work / "void_input")
-    seq_dir = os.path.join(void_dir, "seq")
-    os.makedirs(seq_dir, exist_ok=True)
+    full_mask_path = str(work / "full_mask.mp4")
+    save_mask_video(mask_video, full_mask_path, fps=video_info["fps"])
 
-    shutil.copy(video, os.path.join(seq_dir, "input_video.mp4"))
-    save_mask_video(mask_video, os.path.join(seq_dir, "quadmask_0.mp4"),
-                    fps=video_info["fps"])
-    with open(os.path.join(seq_dir, "prompt.json"), "w") as f:
-        json.dump({"bg": prompt}, f)
+    # Split video + mask into 197-frame chunks with overlap
+    from clear_stage.chunk_video import prepare_chunks, calculate_chunks
+    chunks_dir = str(work / "chunks")
+    chunk_infos = prepare_chunks(
+        video, full_mask_path, prompt, chunks_dir,
+        target_fps=None,  # Keep source fps
+        max_frames=197, overlap=20,
+    )
+    print(f"Split into {len(chunk_infos)} chunks")
 
-    # Step 5: Run VOID inference
+    # Step 5: Run VOID on each chunk
     print("\n=== Step 5: VOID inference ===")
     void_output_dir = str(work / "void_output")
-    run_void_inference(
-        void_dir, ["seq"],
-        sample_size=sample_size,
-        transformer_path=transformer_path,
-        save_path=void_output_dir,
-    )
+    for i, chunk in enumerate(chunk_infos):
+        print(f"  Processing chunk {i+1}/{len(chunk_infos)} "
+              f"(frames {chunk['start']}-{chunk['end']})...")
+        run_void_inference(
+            chunks_dir, [chunk["chunk_name"]],
+            sample_size=sample_size,
+            transformer_path=transformer_path,
+            save_path=void_output_dir,
+        )
 
-    # Step 6: Find output and remux audio
-    print("\n=== Step 6: Finalizing output ===")
-    import glob
-    void_outputs = glob.glob(f"{void_output_dir}/**/*.mp4", recursive=True)
-    # Filter out _tuple files
-    void_outputs = [f for f in void_outputs if "_tuple" not in f]
-    if not void_outputs:
-        raise FileNotFoundError(f"No VOID output found in {void_output_dir}")
-
-    void_result = void_outputs[0]
-    print(f"VOID output: {void_result}")
+    # Step 6: Stitch chunks and finalize
+    print("\n=== Step 6: Stitching & finalizing ===")
+    from clear_stage.stitch_chunks import stitch_chunks
+    source_fps = chunk_infos[0].get("source_fps", video_info["fps"])
+    stitched = str(work / "stitched.mp4")
+    stitch_chunks(chunk_infos, void_output_dir, stitched,
+                  overlap=20, fps=source_fps)
+    void_result = stitched
+    print(f"Stitched output: {void_result}")
 
     # Extract and remux audio from original
     audio_path = str(work / "audio.aac")
