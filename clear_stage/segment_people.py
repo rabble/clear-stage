@@ -93,11 +93,18 @@ def segment_background_people(
     shutil.rmtree(frames_dir, ignore_errors=True)
 
     # Dilate keep regions (255) to shrink removal regions (0),
-    # preventing the mask from eating into the principal dancer
+    # preventing the mask from eating into the principal dancer.
+    # Skip erosion if total removal area is small (< 5% of frame),
+    # as erosion can completely erase small masks.
     if erode_iterations > 0:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        for i in range(mask_video.shape[0]):
-            mask_video[i] = cv2.dilate(mask_video[i], kernel, iterations=erode_iterations)
+        removal_pct = np.sum(mask_video[0] == 0) / mask_video[0].size
+        if removal_pct > 0.05:  # Only erode if significant removal area
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            for i in range(mask_video.shape[0]):
+                mask_video[i] = cv2.dilate(mask_video[i], kernel, iterations=erode_iterations)
+            print(f"Eroded masks ({erode_iterations} iterations)")
+        else:
+            print(f"Skipped erosion (removal area {removal_pct*100:.1f}% too small)")
 
     print(f"Mask video: {mask_video.shape}, "
           f"removal coverage frame 0: {np.sum(mask_video[0] == 0) / mask_video[0].size * 100:.1f}%")
