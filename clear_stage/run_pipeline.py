@@ -35,25 +35,9 @@ def run_mask_generation(config_path: str, device: str = "cuda") -> None:
 
 
 def compute_void_sample_size(width: int, height: int) -> str:
-    """Compute the VOID sample_size string (HxW) preserving aspect ratio.
-
-    VOID's default is 384x672 (landscape). Dimensions must be divisible by 16
-    for the VAE. We pick the closest fit within the ~250k pixel budget
-    (384*672 = 258048) that preserves the input aspect ratio.
-    """
-    target_pixels = 384 * 672  # ~258k pixels, VOID's default budget
-    aspect = width / height
-
-    # Solve: h * w = target_pixels, w/h = aspect
-    # h = sqrt(target_pixels / aspect), w = h * aspect
-    h = int((target_pixels / aspect) ** 0.5)
-    w = int(h * aspect)
-
-    # Round to nearest multiple of 16 (VAE requirement)
-    h = max(16, (h // 16) * 16)
-    w = max(16, (w // 16) * 16)
-
-    return f"{h}x{w}"
+    """Deprecated: use resolution.get_sample_size instead."""
+    from clear_stage.resolution import get_sample_size
+    return get_sample_size(width, height, quality="standard")
 
 
 def run_void_inference(
@@ -101,6 +85,9 @@ def main():
                         help="Skip interactive selection, use this index")
     parser.add_argument("--frame", type=int, default=None,
                         help="Frame to use for detection (default: auto-find)")
+    parser.add_argument("--quality", default="standard",
+                        choices=["preview", "standard", "high"],
+                        help="Output resolution quality")
     args = parser.parse_args()
 
     work = Path(args.work_dir)
@@ -161,8 +148,9 @@ def main():
     print("\n=== Step 5: VOID inference ===")
     # Detect video dimensions and compute aspect-ratio-preserving sample size
     from clear_stage.chunk_video import get_video_info
+    from clear_stage.resolution import get_sample_size
     video_info = get_video_info(args.video)
-    sample_size = compute_void_sample_size(video_info["width"], video_info["height"])
+    sample_size = get_sample_size(video_info["width"], video_info["height"], args.quality)
     print(f"Input: {video_info['width']}x{video_info['height']} -> VOID sample_size: {sample_size}")
     run_void_inference(
         chunks_dir, [c["chunk_name"] for c in chunk_infos],
