@@ -33,7 +33,7 @@ def segment_background_people(
         ret, frame = cap.read()
         if not ret:
             break
-        cv2.imwrite(os.path.join(frames_dir, f"frame_{frame_count:06d}.jpg"), frame)
+        cv2.imwrite(os.path.join(frames_dir, f"{frame_count:06d}.jpg"), frame)
         frame_count += 1
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

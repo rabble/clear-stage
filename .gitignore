@@ -10,3 +10,4 @@ build/
 /work/
 /output/
 *_frame0.jpg
+sample_videos/*.mov
