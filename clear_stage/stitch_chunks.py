@@ -51,9 +51,12 @@ def find_void_output(chunk_dir: str, chunk_name: str) -> str:
 
 def stitch_chunks(
     chunk_infos: list[dict], chunk_output_dir: str, output_path: str,
-    overlap: int = 20, fps: float = 12.0,
+    overlap: int = 20, fps: float = 30.0,
 ) -> str:
-    """Stitch processed chunks with linear crossfade in overlap regions."""
+    """Stitch processed chunks with linear crossfade in overlap regions.
+
+    fps should be the SOURCE video fps for correct playback speed.
+    """
     if len(chunk_infos) == 1:
         src = find_void_output(chunk_output_dir, chunk_infos[0]["chunk_name"])
         subprocess.run(["cp", src, output_path], check=True)

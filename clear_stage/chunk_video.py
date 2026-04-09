@@ -68,32 +68,48 @@ def split_video_chunk(video_path: str, start: int, end: int, fps: float, output_
 
 def prepare_chunks(
     video_path: str, mask_path: str, prompt: str, output_dir: str,
-    target_fps: float = 12.0, max_frames: int = 197, overlap: int = 20,
+    target_fps: float | None = 24.0, max_frames: int = 197, overlap: int = 20,
 ) -> list[dict]:
-    """Downsample, split video+mask, write prompt.json per chunk.
+    """Split video+mask into chunks for VOID processing.
 
-    Returns list of chunk info dicts.
+    If target_fps is set, downsamples first (cheaper, more temporal context per chunk).
+    If target_fps is None, uses source fps (preserves quality, costs more chunks).
+
+    Returns list of chunk info dicts including 'source_fps' for correct output encoding.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    ds_video = str(out / "downsampled_video.mp4")
-    ds_mask = str(out / "downsampled_mask.mp4")
-    downsample_video(video_path, ds_video, target_fps)
-    downsample_video(mask_path, ds_mask, target_fps)
+    source_info = get_video_info(video_path)
+    source_fps = source_info["fps"]
+
+    # Extract audio for later remux
     extract_audio(video_path, str(out / "audio.aac"))
 
-    ds_info = get_video_info(ds_video)
-    chunks = calculate_chunks(ds_info["total_frames"], max_frames, overlap)
+    # Optionally downsample
+    if target_fps is not None and target_fps < source_fps:
+        work_video = str(out / "downsampled_video.mp4")
+        work_mask = str(out / "downsampled_mask.mp4")
+        downsample_video(video_path, work_video, target_fps)
+        downsample_video(mask_path, work_mask, target_fps)
+        process_fps = target_fps
+    else:
+        work_video = video_path
+        work_mask = mask_path
+        process_fps = source_fps
+
+    work_info = get_video_info(work_video)
+    chunks = calculate_chunks(work_info["total_frames"], max_frames, overlap)
 
     chunk_infos = []
     for i, (start, end) in enumerate(chunks):
         cd = out / f"chunk_{i:03d}"
         cd.mkdir(exist_ok=True)
-        split_video_chunk(ds_video, start, end, target_fps, str(cd / "input_video.mp4"))
-        split_video_chunk(ds_mask, start, end, target_fps, str(cd / "quadmask_0.mp4"))
+        split_video_chunk(work_video, start, end, process_fps, str(cd / "input_video.mp4"))
+        split_video_chunk(work_mask, start, end, process_fps, str(cd / "quadmask_0.mp4"))
         with open(cd / "prompt.json", "w") as f:
             json.dump({"bg": prompt}, f)
         chunk_infos.append({"chunk_dir": str(cd), "chunk_name": f"chunk_{i:03d}",
-                           "start": start, "end": end})
+                           "start": start, "end": end,
+                           "source_fps": source_fps, "process_fps": process_fps})
     return chunk_infos
